@@ -80,7 +80,7 @@ $settings = array(
 			'memcached_port'			=> $emulated_master_port + $memcached_port_add_hack,
 			'memcached_key'				=> $sql['global_key'],
 			'memcached_wkey'			=> $sql['global_wkey'],
-			'race_avoid'				=> 1,
+			'race_avoid'				=> 3,
 			'use_get'					=> 1
 			),
 
@@ -114,7 +114,7 @@ mysqlnd_ms.multi_master=1
 	require_once("connect.inc");
 	require_once("util.inc");
  	$sql = mst_get_gtid_memcached($db);
-    $rwhere = "m.id = '" . $sql['global_key'] . "'";
+    $rwhere = "m.id = '" . $sql['global_key'] . ":0'";
    	$wwhere = "m.id = '" . $sql['global_wkey'] . "'";
 	$link = mst_mysqli_connect("myapp", $user, $passwd, $db, $port, $socket);
 	if (mysqli_connect_errno()) {
@@ -124,132 +124,95 @@ mysqlnd_ms.multi_master=1
 	if (mysqli_connect_errno()) {
 		printf("[".(string)2/*offset*/."] [%d] %s\n", mysqli_connect_errno(), mysqli_connect_error());
 	}
+	$link3 = mst_mysqli_connect("myapp", $user, $passwd, $db, $port, $socket);
+	if (mysqli_connect_errno()) {
+		printf("[".(string)3/*offset*/."] [%d] %s\n", mysqli_connect_errno(), mysqli_connect_error());
+	}
 	/* we need an extra non-MS link for checking memcached GTID. */
 	$memc_link = mst_mysqli_connect($emulated_master_host_only, $user, $passwd, $db, $emulated_master_port, $emulated_master_socket);
 	$master1_link = mst_mysqli_connect($master_host_only, $user, $passwd, $db, $master_port, $master_socket);
 	$master2_link = mst_mysqli_connect($slave_host_only, $user, $passwd, $db, $slave_port, $slave_socket);
 	
-	mst_mysqli_query(3/*offset*/, $link, "SET @myrole = 'Master1'");
+	mst_mysqli_query(4/*offset*/, $link, "SET @myrole = 'Master1'"); //Execute on master1
 
-	mst_mysqli_query(4/*offset*/, $link, "SET @myrole = 'Master2'");
+	mst_mysqli_query(5/*offset*/, $link, "SET @myrole = 'Master2'"); //Execute on master2
 
-	mst_mysqli_query(5/*offset*/, $link, "SET @myrole = 'Master3'");
+	mst_mysqli_query(6/*offset*/, $link, "SET @myrole = 'Master3'"); //Execute on master3
 
-	$res = mst_mysqli_query(6/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL");
-	var_dump($res->fetch_assoc());
-	$res = mst_mysqli_query(7/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL");
-	var_dump($res->fetch_assoc());
-	$res = mst_mysqli_query(8/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL");
-	var_dump($res->fetch_assoc());
-
-	mst_mysqli_query(9/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@@server_uuid)");
+	mst_mysqli_query(7/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@myrole)"); //Execute on master1
 	$master1_gtid = $gtid = mysqlnd_ms_get_last_gtid($link);
 	if (!$gtid)
-		printf("[".(string)10/*offset*/."] Expecting gtid got empty, [%d] %s\n", $link->errno, $link->error);	
-	$rgtid = mst_mysqli_fetch_gtid_memcached(11/*offset*/, $memc_link, $db, $rwhere);
-	$wgtid = mst_mysqli_fetch_wgtid_memcached(12/*offset*/, $memc_link, $db, $wwhere);
-	if ($rgtid != $gtid || $wgtid[1] != $gtid)
-		printf("[".(string)13/*offset*/."] Expecting gtid %s on memcached got %s %s\n", $gtid, $rgtid, $wgtid[1]);	
-	$res = mst_mysqli_query(14/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
+		printf("[".(string)8/*offset*/."] Expecting gtid got empty, [%d] %s\n", $link->errno, $link->error);	
+	$rgtid = mst_mysqli_fetch_gtid_memcached(9/*offset*/, $memc_link, $db, $rwhere, true);
+	$wgtid = mst_mysqli_fetch_wgtid_memcached(10/*offset*/, $memc_link, $db, $wwhere, true);
+	if ($rgtid[1] != $gtid || $wgtid[1] != $gtid)
+		printf("[".(string)11/*offset*/."] Expecting gtid %s on memcached got %s %s\n", $gtid, $rgtid, $wgtid[1]);	
+	if (!mst_mysqli_wait_gtid_memcached(12/*offset*/, $master2_link, $db, $gtid))
+		printf("[".(string)13/*offset*/."] Timeout or gtid not replicated for %s, [%d] %s\n", $gtid, $master2_link->errno, $master2_link->error);	
+
+    print "fetch on master2?";
+	$res = mst_mysqli_query(14/*offset*/, $link, "SELECT CONCAT(@myrole,'-',id) AS _ext_id FROM gtid_test ORDER BY _ext_id"); //Execute on master2
+	var_dump($res->fetch_all());
 	
-	if (!mst_mysqli_wait_gtid_memcached(15/*offset*/, $master2_link, $db, $gtid))
-		printf("[".(string)16/*offset*/."] Timeout or gtid not replicated for %s, [%d] %s\n", $gtid, $master2_link->errno, $master2_link->error);	
+    print "fetch on master1?";
+	$res = mst_mysqli_query(15/*offset*/, $link, "SELECT CONCAT(@myrole,'-',id) AS _ext_id FROM gtid_test ORDER BY _ext_id"); //Execute on master1
+	var_dump($res->fetch_all());
 
-	// The list of masters has now changed so the roundrobin filter will reset context, so we are again on first position and we get duplicate key error
-	if (mst_mysqli_query(17/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@@server_uuid)"))
-		printf("[".(string)18/*offset*/."] Expecting error got [%d] %s\n", $link->errno, $link->error);		
-	$gtid = mysqlnd_ms_get_last_gtid($link);
-	if ($gtid != $master1_gtid)
-		printf("[".(string)19/*offset*/."] Expecting unmodified gtid got the new %s %s, [%d] %s\n", $master1_gtid, $gtid, $link->errno, $link->error);
-	$rgtid = mst_mysqli_fetch_gtid_memcached(20/*offset*/, $memc_link, $db, $rwhere);
-	$wgtid = mst_mysqli_fetch_wgtid_memcached(21/*offset*/, $memc_link, $db, $wwhere); // wgtid should be empty
-	if ($rgtid != $gtid ||!$wgtid[1])
-		printf("[".(string)22/*offset*/."] Expecting gtid %s on memcached got %s %s\n", $gtid, $rgtid, $wgtid[1]);	
-	$res = mst_mysqli_query(23/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
+    print "fetch on master2?";
+	$res = mst_mysqli_query(16/*offset*/, $link, "SELECT CONCAT(@myrole,'-',id) AS _ext_id FROM gtid_test ORDER BY _ext_id"); //Execute on master2
+	var_dump($res->fetch_all());
+
+    print "Errors for link1?";
+	$res = mst_mysqli_fetch_gtid_memcached_errors(17/*offset*/, $memc_link, $db);
+	var_dump($res->fetch_all());
+
+    print "fetch on master1?";
+	$res = mst_mysqli_query(18/*offset*/, $link2, "SELECT *  FROM gtid_test"); //Execute on master1
+	var_dump($res->fetch_all());
 	
+    print "fetch on master2?";
+	$res = mst_mysqli_query(19/*offset*/, $link2, "SELECT * FROM gtid_test"); //Execute on master2
+	var_dump($res->fetch_all());
 
-	mst_mysqli_query(24/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@@server_uuid)");
-	$master2_gtid = $gtid = mysqlnd_ms_get_last_gtid($link);
-	if (!$gtid)
-		printf("[".(string)25/*offset*/."] Expecting new gtid got empty %s, [%d] %s\n", $gtid, $link->errno, $link->error);
-	$rgtid = mst_mysqli_fetch_gtid_memcached(26/*offset*/, $memc_link, $db, $rwhere);
-	$wgtid = mst_mysqli_fetch_wgtid_memcached(27/*offset*/, $memc_link, $db, $wwhere);
-	if ($rgtid != $gtid || $wgtid[1] != $gtid)
-		printf("[".(string)28/*offset*/."] Expecting gtid %s on memcached got %s %s\n", $gtid, $rgtid, $wgtid[1]);	
-	$res = mst_mysqli_query(29/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
+    print "fetch on master1?";
+	$res = mst_mysqli_query(20/*offset*/, $link2, "SELECT * FROM gtid_test"); //Execute on master2
+	var_dump($res->fetch_all());
 
-	if (!mst_mysqli_wait_gtid_memcached(30/*offset*/, $master1_link, $db, $gtid))
-		printf("[".(string)31/*offset*/."] Timeout or gtid not replicated for %s, [%d] %s\n", $gtid, $master1_link->errno, $master1_link->error);	
-		
-	if (mst_mysqli_query(32/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@@server_uuid)"))
-		printf("[".(string)33/*offset*/."] Expecting error got [%d] %s\n", $link->errno, $link->error);		
-	$gtid = mysqlnd_ms_get_last_gtid($link);
-	if ($gtid != $master1_gtid)
-		printf("[".(string)34/*offset*/."] Expecting unmodified gtid got the new %s %s, [%d] %s\n", $master1_gtid, $gtid, $link->errno, $link->error);
-	$rgtid = mst_mysqli_fetch_gtid_memcached(35/*offset*/, $memc_link, $db, $rwhere);
-	$wgtid = mst_mysqli_fetch_wgtid_memcached(36/*offset*/, $memc_link, $db, $wwhere);
-	if ($rgtid != $master2_gtid || !$wgtid[1]) // The last effective write was from master2
-		printf("[".(string)37/*offset*/."] Expecting gtid %s on memcached got %s %s\n", $master2_gtid, $rgtid, $wgtid[1]);	
-	$res = mst_mysqli_query(38/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
+    print "Errors for link2?";
+	$res = mst_mysqli_fetch_gtid_memcached_errors(21/*offset*/, $memc_link, $db);
+	var_dump($res->fetch_all());
+
+	$res = mst_mysqli_query(22/*offset*/, $master1_link, $sql['fetch_last_gtid']); //get last gtid from valid master
+	$gtid = $res->fetch_assoc()['trx_id'];
+
+    $emid = $emulated_master_host_only . ':' . $emulated_master_port . ':' . ($emulated_master_socket ? $emulated_master_socket : '/var/lib/mysql/mysql.sock');
+    $slid = $slave_host_only . ':' . $slave_port . ':' . ($slave_socket ? $slave_socket : '/var/lib/mysql/mysql.sock');
+
+	// Check cached
+	$res = mst_mysqli_query(24/*offset*/, $memc_link, $sql['select'] . " WHERE id = '$emid' OR id = '$slid'"); //get last gtid from valid master
+	if (($c = count($res->fetch_all())) != 2)
+		printf("[".(string)13/*offset*/."] Unexpected last_gtid cached count %d\n", $c);	
+
+	// Add cache for master3
+
+	mst_mysqli_set_gtid_memcached(23/*offset*/, $memc_link, $db, $gtid, 'id = \'' . $emulated_master_host_only . ':' . $emulated_master_port . ':' . ($emulated_master_socket ? $emulated_master_socket : '/var/lib/mysql/mysql.sock') . '\'', $gtid, $db);
+
+    print "fetch on master1?";
+	$res = mst_mysqli_query(25/*offset*/, $link3, "SELECT *  FROM gtid_test"); //Execute on master1
+	var_dump($res->fetch_all());
 	
-	mst_mysqli_query(39/*offset*/, $link2, "SET @myrole = 'Master1'");
+    print "fetch on master2?";
+	$res = mst_mysqli_query(26/*offset*/, $link3, "SELECT * FROM gtid_test"); //Execute on master2
+	var_dump($res->fetch_all());
 
-	mst_mysqli_query(40/*offset*/, $link2, "SET @myrole = 'Master2'");
+    print "fetch on master3?";
+	$res = mst_mysqli_query(27/*offset*/, $link3, "SELECT * FROM gtid_test"); //Execute on master3
+	var_dump($res->fetch_all());
 
-	mst_mysqli_query(41/*offset*/, $link2, "SET @myrole = CONCAT(@myrole,'-1')"); //write consistency exclude master3 and roundrobin restart from master1
 
-	$res = mst_mysqli_query(42/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL");
-	var_dump($res->fetch_assoc());
-	$res = mst_mysqli_query(43/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL");
-	var_dump($res->fetch_assoc());
-	$res = mst_mysqli_query(44/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL"); // No read consistency gtid as been set so this will be master 3
-	var_dump($res->fetch_assoc());
-
-	print "Test running queue\n";
-	mst_mysqli_query(45/*offset*/, $link2, "SET @myrole = CONCAT(@myrole,'-2')");
-	$res = mst_mysqli_query(46/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_set_gtid_memcached(47/*offset*/, $memc_link, $db, '1', "id LIKE '%.%'"); //set running counter to 1
-	print "Stick to master2\n";
-	mst_mysqli_query(48/*offset*/, $link2, "SET @myrole = CONCAT(@myrole,'-2')");
-	$res = mst_mysqli_query(49/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_query(50/*offset*/, $link, "SET @myrole = CONCAT(@myrole,'-2')");
-	$res = mst_mysqli_query(51/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_query(52/*offset*/, $link, "SET @myrole = CONCAT(@myrole,'-2')");
-	$res = mst_mysqli_query(53/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_set_gtid_memcached(54/*offset*/, $memc_link, $db, '0', "id LIKE '%.%'"); //set running counter to 0
-	print "Roundrobin again\n";
-	mst_mysqli_query(55/*offset*/, $link2, "SET @myrole = @myrole");
-	$res = mst_mysqli_query(56/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_query(57/*offset*/, $link2, "SET @myrole = @myrole");
-	$res = mst_mysqli_query(58/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_query(59/*offset*/, $link, "SET @myrole = @myrole");
-	$res = mst_mysqli_query(60/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	mst_mysqli_query(61/*offset*/, $link, "SET @myrole = @myrole");
-	$res = mst_mysqli_query(62/*offset*/, $link, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
-	
-			
-	print "Test avoid race add error token\n";
-	mst_mysqli_delete_gtid_memcached(63/*offset*/, $memc_link, $db, "id LIKE '%:%'"); // Delete all running gtids
-	if (mst_mysqli_query(64/*offset*/, $link, "INSERT INTO gtid_test(id) VALUES(@@server_uuid)")) // We now should get warnings and error "Something wrong..." 
-		printf("[".(string)65/*offset*/."] Expecting error got [%d] %s\n", $link->errno, $link->error);		
-	$wgtid = mst_mysqli_fetch_wgtid_memcached(66/*offset*/, $memc_link, $db, $wwhere);
-	if ($wgtid[0] != 'X')
-		printf("[".(string)67/*offset*/."] Expecting gtid error marker 'X' got %s\n", $wgtid[0]);
-	mst_mysqli_query(68/*offset*/, $link2, "SET @myrole = CONCAT(@myrole,'-1')"); //should get a warning and set to master 1
-	$res = mst_mysqli_query(69/*offset*/, $link2, "SELECT @myrole AS _role FROM DUAL", MYSQLND_MS_LAST_USED_SWITCH);
-	var_dump($res->fetch_assoc());
+    print "Errors for link3?";
+	$res = mst_mysqli_fetch_gtid_memcached_errors(28/*offset*/, $memc_link, $db);
+	var_dump($res->fetch_all());
 
 	print "done!";
 ?>
@@ -268,99 +231,137 @@ mysqlnd_ms.multi_master=1
 		printf("[clean] %s\n", $error);
 		
 ?>
---XFAIL--
-should be rewritten for nowait consensus
 --EXPECTF--
-array(1) {
-  ["_role"]=>
-  string(7) "Master1"
+fetch on master2?array(2) {
+  [0]=>
+  array(1) {
+    [0]=>
+    string(15) "Master1-Master1"
+  }
+  [1]=>
+  array(1) {
+    [0]=>
+    string(24) "Master1-MY_EXECUTED_GTID"
+  }
 }
-array(1) {
-  ["_role"]=>
-  string(7) "Master2"
+fetch on master1?array(2) {
+  [0]=>
+  array(1) {
+    [0]=>
+    string(15) "Master2-Master1"
+  }
+  [1]=>
+  array(1) {
+    [0]=>
+    string(24) "Master2-MY_EXECUTED_GTID"
+  }
 }
-array(1) {
-  ["_role"]=>
-  string(7) "Master3"
+fetch on master2?array(2) {
+  [0]=>
+  array(1) {
+    [0]=>
+    string(15) "Master1-Master1"
+  }
+  [1]=>
+  array(1) {
+    [0]=>
+    string(24) "Master1-MY_EXECUTED_GTID"
+  }
 }
-array(1) {
-  ["_role"]=>
-  string(7) "Master1"
+Errors for link1?array(0) {
 }
-[%s] [1062] Duplicate entry '%s' for key 'PRIMARY'
-array(1) {
-  ["_role"]=>
-  string(7) "Master1"
+fetch on master1?array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(7) "Master1"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-array(1) {
-  ["_role"]=>
-  string(7) "Master2"
+fetch on master2?array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(7) "Master1"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-[%s] [1062] Duplicate entry '%s' for key 'PRIMARY'
-array(1) {
-  ["_role"]=>
-  string(7) "Master1"
+fetch on master1?array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(7) "Master1"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-array(1) {
-  ["_role"]=>
-  string(9) "Master1-1"
+Errors for link2?array(0) {
 }
-array(1) {
-  ["_role"]=>
-  string(7) "Master2"
+fetch on master1?array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(7) "Master1"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-array(1) {
-  ["_role"]=>
-  NULL
+fetch on master2?array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(7) "Master1"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-Test running queue
-array(1) {
-  ["_role"]=>
-  string(9) "Master2-2"
+fetch on master3?array(1) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(16) "MY_EXECUTED_GTID"
+    [1]=>
+    string(0) ""
+  }
 }
-Stick to master2
-array(1) {
-  ["_role"]=>
-  string(11) "Master2-2-2"
-}
-array(1) {
-  ["_role"]=>
-  string(9) "Master2-2"
-}
-array(1) {
-  ["_role"]=>
-  string(11) "Master2-2-2"
-}
-Roundrobin again
-array(1) {
-  ["_role"]=>
-  string(9) "Master1-1"
-}
-array(1) {
-  ["_role"]=>
-  string(11) "Master2-2-2"
-}
-array(1) {
-  ["_role"]=>
-  string(11) "Master2-2-2"
-}
-array(1) {
-  ["_role"]=>
-  string(7) "Master1"
-}
-Test avoid race add error token
-
-Warning: mysqli::query(): (mysqlnd_ms) Something wrong: previous key not found %s. Maybe you need to increase wait_for_wgtid_timeout in %s on line %d
-
-Warning: mysqli::query(): (mysqlnd_ms) Something wrong no valid master or no valid write history for key %s: first (null) last (null) in %s on line %d
-
-Warning: mysqli::query(): (mysqlnd_ms) Couldn't find the appropriate master connection. Something is wrong in %s on line %d
-[%s] [2000] (mysqlnd_ms) Couldn't find the appropriate master connection. Something is wrong
-
-Warning: mysqli::query(): (mysqlnd_ms)No valid write history, found error token (null) for key %s: fallback to read consistency rgtid (null) in %s on line %d
-array(1) {
-  ["_role"]=>
-  string(11) "Master1-1-1"
+Errors for link3?array(0) {
 }
 done!
 
